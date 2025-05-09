@@ -1,0 +1,10 @@
+fastapi==0.109.2
+uvicorn==0.27.0
+PyPDF2==3.0.1
+sentence-transformers==2.3.1
+scikit-learn==1.4.0
+requests==2.31.0
+python-multipart==0.0.9
+langchain-google-genai==0.0.7
+langchain-core==0.1.18
+numpy==1.26.3 
