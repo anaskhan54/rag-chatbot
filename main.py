@@ -1,0 +1,234 @@
+import os
+import shutil
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import uvicorn
+
+from vectorize_pdf import vectorize_pdf
+from agent import process_query
+from llm import generate_response
+
+app = FastAPI(title="RAG-Powered Q&A System")
+
+# Create templates directory if it doesn't exist
+os.makedirs("templates", exist_ok=True)
+
+# Create templates/index.html
+with open("templates/index.html", "w") as f:
+    f.write("""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG-Powered Q&A System</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .loader {
+            border-top-color: #3498db;
+            -webkit-animation: spinner 1.5s linear infinite;
+            animation: spinner 1.5s linear infinite;
+        }
+        @-webkit-keyframes spinner {
+            0% { -webkit-transform: rotate(0deg); }
+            100% { -webkit-transform: rotate(360deg); }
+        }
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .answer-box {
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <div class="text-center mb-10">
+            <h1 class="text-3xl font-bold text-indigo-600">RAG-Powered Q&A System</h1>
+            <p class="text-gray-600 mt-2">Upload a PDF and ask questions about its content</p>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800">Upload Document</h2>
+            <form id="uploadForm" class="space-y-4">
+                <div class="flex items-center justify-center w-full">
+                    <label class="flex flex-col w-full h-32 border-4 border-dashed hover:bg-gray-100 hover:border-indigo-300 border-gray-300 rounded-lg cursor-pointer">
+                        <div class="flex flex-col items-center justify-center pt-7">
+                            <svg class="w-10 h-10 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                            <p class="pt-1 text-sm text-gray-500" id="file-name">Upload PDF (click or drag)</p>
+                        </div>
+                        <input type="file" class="opacity-0" id="pdf_file" name="pdf_file" accept="application/pdf">
+                    </label>
+                </div>
+                <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline">
+                    Process Document
+                </button>
+            </form>
+            <div id="upload-status" class="mt-3 text-center hidden">
+                <div class="inline-flex items-center">
+                    <div class="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-8 w-8 mr-2"></div>
+                    <p class="text-indigo-600">Processing document...</p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="query-section" class="bg-white rounded-lg shadow-lg p-6 hidden">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800">Ask Questions</h2>
+            <form id="queryForm" class="space-y-4">
+                <div class="flex items-center">
+                    <input type="text" id="query" name="query" placeholder="What is this document about?" class="appearance-none block w-full bg-gray-50 border border-gray-300 rounded-md py-3 px-4 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                    <button type="submit" class="ml-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded focus:outline-none focus:shadow-outline">
+                        Ask
+                    </button>
+                </div>
+            </form>
+            <div id="query-status" class="mt-3 text-center hidden">
+                <div class="inline-flex items-center">
+                    <div class="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-8 w-8 mr-2"></div>
+                    <p class="text-indigo-600">Thinking...</p>
+                </div>
+            </div>
+            
+            <div id="result" class="mt-6 hidden">
+                <div class="flex items-center mb-2">
+                    <span id="tool-badge" class="bg-indigo-100 text-indigo-800 text-xs font-semibold px-2.5 py-0.5 rounded">RAG</span>
+                </div>
+                <div class="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                    <h3 class="font-medium text-gray-900">Answer</h3>
+                    <div id="answer" class="mt-2 text-gray-700 answer-box"></div>
+                </div>
+            </div>
+            
+            <div class="mt-6">
+                <h3 class="font-medium text-gray-700 mb-2">Example queries:</h3>
+                <div class="space-y-2">
+                    <button class="example-query bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-1 px-3 rounded text-sm">What is this document about?</button>
+                    <button class="example-query bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-1 px-3 rounded text-sm">calculate 25 * 4 / 10</button>
+                    <button class="example-query bg-gray-100 hover:bg-gray-200 text-gray-800 font-medium py-1 px-3 rounded text-sm">define algorithm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.getElementById('pdf_file').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name || 'Upload PDF (click or drag)';
+            document.getElementById('file-name').textContent = fileName;
+        });
+        
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('pdf_file');
+            if (!fileInput.files[0]) {
+                alert('Please select a PDF file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('pdf_file', fileInput.files[0]);
+            
+            document.getElementById('upload-status').classList.remove('hidden');
+            
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    document.getElementById('query-section').classList.remove('hidden');
+                    document.getElementById('upload-status').classList.add('hidden');
+                } else {
+                    alert('Error processing document: ' + result.message);
+                    document.getElementById('upload-status').classList.add('hidden');
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+                document.getElementById('upload-status').classList.add('hidden');
+            }
+        });
+        
+        document.getElementById('queryForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const query = document.getElementById('query').value.trim();
+            if (!query) return;
+            
+            document.getElementById('query-status').classList.remove('hidden');
+            document.getElementById('result').classList.add('hidden');
+            
+            try {
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ query })
+                });
+                
+                const result = await response.json();
+                document.getElementById('query-status').classList.add('hidden');
+                document.getElementById('result').classList.remove('hidden');
+                
+                document.getElementById('tool-badge').textContent = result.tool.toUpperCase();
+                document.getElementById('answer').textContent = result.answer;
+            } catch (error) {
+                alert('Error: ' + error.message);
+                document.getElementById('query-status').classList.add('hidden');
+            }
+        });
+        
+        // Handle example queries
+        document.querySelectorAll('.example-query').forEach(button => {
+            button.addEventListener('click', function() {
+                const query = this.textContent;
+                document.getElementById('query').value = query;
+                document.getElementById('queryForm').dispatchEvent(new Event('submit'));
+            });
+        });
+    </script>
+</body>
+</html>
+    """)
+
+# Mount templates directory
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.post("/upload")
+async def upload_pdf(pdf_file: UploadFile = File(...)):
+    try:
+        # Save the uploaded file as doc.pdf
+        with open('doc.pdf', 'wb') as dest_file:
+            content = await pdf_file.read()
+            dest_file.write(content)
+        
+        # Process the PDF file
+        vectorize_pdf()
+        
+        return {"status": "success", "message": "Document processed successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/query")
+async def process_user_query(query_data: dict):
+    query = query_data.get("query", "")
+    try:
+        result = process_query(query, generate_response)
+        return result
+    except Exception as e:
+        return {"tool": "error", "answer": f"Error: {str(e)}"}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
